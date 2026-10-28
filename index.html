@@ -1373,6 +1373,8 @@ const Backend = {
       throw new Error(result.message || 'Terjadi kesalahan pada server.');
     } catch (err) {
       console.error(err);
+      // fetch hanya melempar TypeError saat koneksi gagal; galat server tetap berupa pesan biasa
+      if (err instanceof TypeError) throw new Error('Koneksi terputus saat menghubungi server. Periksa sinyal internet lalu coba lagi.');
       throw err;
     }
   }
@@ -1765,15 +1767,19 @@ const Form={
     btn.innerHTML='<span class="sk" style="width:80px;height:14px;display:inline-block"></span>';
     try{
       // siapkan berkas: kirim base64 ke Google Drive backend
-      const fileNames=[];
       fd._files=[];
+      let total=0;
       for(const [slot,arr] of Object.entries(this.files)){
         for(const it of arr){
-          const b64=await toBase64(it.file);
-          fd._files.push({slot,name:it.name,mime:it.file.type,data:b64});
-          fileNames.push(it.name);
+          const f=await kecilkanFoto(it.file);
+          const nama=f===it.file?it.name:it.name.replace(/\.[^.]+$/,'')+'.jpg';
+          const b64=await toBase64(f);
+          total+=b64.length;
+          fd._files.push({slot,name:nama,mime:f.type||it.file.type,data:b64});
         }
       }
+      if(total>BATAS_KIRIM)
+        throw new Error('Total berkas terlalu besar ('+Math.round(total*.75/1048576)+' MB). Perkecil dokumen lalu coba lagi.');
       const r=await withLoader(Backend.call('submitPermohonan',fd), 'Mengirim bahan…');
       this._sukses(r.tiket, r.isRevisi);
       form.reset();
@@ -1798,6 +1804,26 @@ const Form={
 };
 function toBase64(file){ return new Promise((res,rej)=>{ const r=new FileReader();
   r.onload=()=>res(r.result.split(',')[1]); r.onerror=rej; r.readAsDataURL(file); }); }
+// Foto kamera HP 3-8 MB/berkas; dikirim mentah (base64 ~1,33x) payload jadi puluhan MB dan
+// upload lewat 4G sering putus di tengah jalan ("Failed to fetch"). Perkecil di peramban dulu.
+const FOTO_SISI_MAKS=1920, FOTO_KUALITAS=.82, BATAS_KIRIM=30*1048576;
+function kecilkanFoto(file){
+  if(!/^image\/(jpeg|png|webp)$/i.test(file.type)) return Promise.resolve(file);
+  return new Promise(res=>{
+    const url=URL.createObjectURL(file), img=new Image();
+    img.onload=()=>{
+      URL.revokeObjectURL(url);
+      const s=Math.min(1,FOTO_SISI_MAKS/Math.max(img.naturalWidth,img.naturalHeight));
+      const c=document.createElement('canvas');
+      c.width=Math.round(img.naturalWidth*s); c.height=Math.round(img.naturalHeight*s);
+      const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,c.height);
+      g.drawImage(img,0,0,c.width,c.height);
+      c.toBlob(b=>res(b&&b.size<file.size?b:file),'image/jpeg',FOTO_KUALITAS);
+    };
+    img.onerror=()=>{ URL.revokeObjectURL(url); res(file); };
+    img.src=url;
+  });
+}
 
 // ============================================================
 // STATUS publik + timeline
